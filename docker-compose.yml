@@ -1,0 +1,164 @@
+version: "3.9"
+
+
+services:
+
+  _base: &base
+    build:
+      context: .
+      dockerfile: Dockerfile
+    entrypoint: []
+    volumes:
+      - .:/code
+    environment: &base-environment
+      # Adding environment variable here do not forget to add environment
+      # variable to `.env.example`
+      ENVIRONMENT: local
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: recommendations
+      KAFKA_HOST: kafka
+      KAFKA_PORT: 9092
+      KAFKA_SERVERS: kafka:9092
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_DB: 13
+      AUTHENTICATION_API_URL: http://host.docker.internal:8092
+      JWT_SECRET_KEY: 'test'
+    extra_hosts:
+      # allows to access `localhost` on host from docker using host `host.docker.internal`
+      - "host.docker.internal:host-gateway"
+
+  app: &app
+    <<: *base
+    ports:
+      - "8009:8009"
+    entrypoint: ["docker/start.sh"]
+    depends_on:
+      - db
+      - redis
+      - kafka
+      - consumer
+
+  # Service for debugging in Pycharm. Main difference from the `app` service is
+  # that entrypoint is empty, because Pycharm will be responsible for starting
+  # FastAPI server
+  app-debug:
+    <<: *app
+    entrypoint: []
+
+  consumer:
+    <<: *base
+    entrypoint: ["docker/consumer.sh"]
+    depends_on:
+      - kafka
+      - db
+      - redis
+
+  worker:
+    <<: *base
+    entrypoint: [ "docker/worker.sh" ]
+    depends_on:
+      - kafka
+      - db
+      - redis
+
+  db:
+    image: postgres:11-alpine
+    ports:
+      - "6543:6543"
+    environment: &db-environment
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_USER: postgres
+      POSTGRES_DB: recommendations
+      # POSTGRES_PORT: 6543
+    volumes:
+      # persist database data between restarts
+      - pgdata:/var/lib/postgresql/data
+      # on start database will be restored from dumps
+      - ./docker/dumps_restore.sh:/docker-entrypoint-initdb.d/dumps_restore.sh
+      - ./.dumps:/dumps
+
+  # database for tests, available by URL:
+  #  - postgres:postgres@db-test:5432/recommendations - in docker container
+  #  - postgres:postgres@localhost:5433/recommendations - outside of docker container
+  db-test:
+    image: postgres:11-alpine
+    ports:
+      - "5433:5432"
+    environment:
+      <<: *db-environment
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper
+    ports:
+      - "2181:2181"
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+
+  kafka:
+    image: confluentinc/cp-kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9093:9092"
+      - "29093:29092"
+    environment:
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT, PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092, PLAINTEXT_HOST://localhost:29092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    ports:
+      - "8089:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+
+  alembic:
+    <<: *base
+    depends_on:
+      - db
+    entrypoint: ["alembic"]
+
+  alembic-autogenerate:
+    <<: *base
+    depends_on:
+      - db
+    entrypoint: ["alembic", "revision", "--autogenerate", "-m"]
+
+  test: &test
+    <<: *base
+    environment:
+      <<: *base-environment
+      POSTGRES_HOST: db-test
+    entrypoint: ["docker/test.sh"]
+    depends_on:
+      - db-test
+      - redis
+
+  poetry:
+    <<: *base
+    entrypoint: ["poetry"]
+
+  lint:
+    <<: *base
+    entrypoint: ["docker/lint.sh"]
+
+  lint-check:
+    <<: *base
+    entrypoint: [ "docker/lint_check.sh" ]
+
+
+volumes:
+  pgdata:
